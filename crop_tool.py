@@ -1,13 +1,27 @@
 from pathlib import Path
 import json
+import os
 import queue
 import subprocess
+import sys
 import threading
 import uuid
 
 from flask import Flask, Response, abort, jsonify, request, send_from_directory, stream_with_context
 
-VIDEO_FOLDER = Path(__file__).resolve().parent
+# When frozen by PyInstaller, use the exe's directory so videos sit next to the app.
+# CROP_TOOL_VIDEO_DIR lets the launcher override this (e.g. right-click "Open With").
+if getattr(sys, "frozen", False):
+    _default_dir = Path(sys.executable).resolve().parent
+else:
+    _default_dir = Path(__file__).resolve().parent
+
+VIDEO_FOLDER = Path(os.environ.get("CROP_TOOL_VIDEO_DIR", _default_dir)).resolve()
+INITIAL_FILE = os.environ.get("CROP_TOOL_INITIAL_FILE", "")
+
+# Extra directories added at runtime via POST /add-dir (e.g. successive right-clicks)
+_extra_dirs: list[Path] = []
+_extra_dirs_lock = threading.Lock()
 VIDEO_EXTENSIONS = (".mp4", ".mkv", ".avi", ".mov", ".webm", ".m4v")
 
 app = Flask(__name__)
@@ -16,18 +30,33 @@ JOBS = {}
 
 # ------------ helpers -------------------------------------------------------
 
+def _all_dirs() -> list[Path]:
+    dirs = [VIDEO_FOLDER]
+    with _extra_dirs_lock:
+        dirs.extend(_extra_dirs)
+    return dirs
+
+
 def list_videos():
-    return sorted(
-        f.name for f in VIDEO_FOLDER.iterdir()
-        if f.is_file() and f.suffix.lower() in VIDEO_EXTENSIONS
-    )
+    seen: set[str] = set()
+    results: list[str] = []
+    for d in _all_dirs():
+        try:
+            for f in d.iterdir():
+                if f.is_file() and f.suffix.lower() in VIDEO_EXTENSIONS and f.name not in seen:
+                    seen.add(f.name)
+                    results.append(f.name)
+        except OSError:
+            pass
+    return sorted(results)
 
 
 def safe_video_path(name):
-    path = (VIDEO_FOLDER / name).resolve()
-    if path.parent != VIDEO_FOLDER or not path.is_file() or path.suffix.lower() not in VIDEO_EXTENSIONS:
-        abort(404)
-    return path
+    for d in _all_dirs():
+        path = (d / name).resolve()
+        if path.parent == d and path.is_file() and path.suffix.lower() in VIDEO_EXTENSIONS:
+            return path
+    abort(404)
 
 
 def get_video_metadata(name):
@@ -441,15 +470,41 @@ let currentUrlValue = "";
 let videos = [];
 
 // ---------- init: load video list ------------------------------------------
-fetch("/list")
-.then(r => r.json())
-.then(data => {
+async function initVideoList() {
+    // If launched via right-click "Open With", a dir param may be set.
+    // Notify the server to add that directory before listing.
+    const params = new URLSearchParams(window.location.search);
+    const fileParam = params.get("file");
+    const dirParam  = params.get("dir");
+
+    if (dirParam) {
+        await fetch("/add-dir", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ dir: dirParam })
+        }).catch(() => {});
+        // Clean up URL so reloads don't re-add the dir
+        const clean = window.location.pathname;
+        window.history.replaceState({}, "", clean);
+    }
+
+    // Also check the server-side startup file (set via CROP_TOOL_INITIAL_FILE env)
+    let startupFile = fileParam || "";
+    if (!startupFile) {
+        try {
+            let r = await fetch("/startup-file");
+            let d = await r.json();
+            startupFile = d.file || "";
+        } catch(e) {}
+    }
+
+    let data = await fetch("/list").then(r => r.json()).catch(() => []);
     videos = data;
     videoList.innerHTML = "";
     if (data.length === 0) {
         let opt = document.createElement("option");
         opt.value = "";
-        opt.textContent = "No videos found next to crop_tool.py";
+        opt.textContent = "No videos found";
         videoList.appendChild(opt);
         updateUi();
         return;
@@ -460,14 +515,17 @@ fetch("/list")
         opt.textContent = v;
         videoList.appendChild(opt);
     });
-    let saved = localStorage.getItem(videoStorageKey);
-    if (saved && data.includes(saved)) {
-        videoList.value = saved;
-        loadVideo(false);
-    } else {
-        loadVideo(false);
+
+    // Priority: URL/env file param > localStorage
+    let target = (startupFile && data.includes(startupFile))
+        ? startupFile
+        : localStorage.getItem(videoStorageKey);
+    if (target && data.includes(target)) {
+        videoList.value = target;
     }
-});
+    loadVideo(false);
+}
+initVideoList();
 
 videoList.addEventListener("change", () => loadVideo(true));
 video.addEventListener("timeupdate", updateUi);
@@ -952,10 +1010,26 @@ def url_info():
     return jsonify(get_url_info_via_ytdlp(url))
 
 
+@app.route("/startup-file")
+def startup_file():
+    return jsonify({"file": INITIAL_FILE})
+
+
+@app.route("/add-dir", methods=["POST"])
+def add_dir():
+    payload = request.get_json(force=True, silent=True) or {}
+    d = Path(payload.get("dir", "")).resolve()
+    if d.is_dir():
+        with _extra_dirs_lock:
+            if d not in _extra_dirs and d != VIDEO_FOLDER:
+                _extra_dirs.append(d)
+    return jsonify({"ok": True, "dir": str(d)})
+
+
 @app.route("/video/<path:name>")
 def video(name):
-    safe_video_path(name)
-    return send_from_directory(VIDEO_FOLDER, name, conditional=True)
+    path = safe_video_path(name)
+    return send_from_directory(str(path.parent), path.name, conditional=True)
 
 
 @app.route("/run", methods=["POST"])
