@@ -32,6 +32,30 @@ kill_port() {
       fi
     done
   fi
+
+  # WSL fallback: kill Windows-side processes via PowerShell (invisible to lsof/fuser/ss).
+  # Flask debug mode runs a reloader parent + server child; kill child AND its parent.
+  if grep -qiE 'microsoft|wsl' /proc/version 2>/dev/null && command -v powershell.exe >/dev/null 2>&1; then
+    local attempts=0
+    while [ $attempts -lt 5 ]; do
+      local win_pids
+      win_pids="$(powershell.exe -NoProfile -Command "
+        \$child_pids = (Get-NetTCPConnection -LocalPort ${port} -State Listen -ErrorAction SilentlyContinue).OwningProcess |
+          Where-Object { \$_ -ne 0 } | Sort-Object -Unique
+        \$parent_pids = \$child_pids | ForEach-Object {
+          (Get-WmiObject Win32_Process -Filter \"ProcessId = \$_\" -ErrorAction SilentlyContinue).ParentProcessId
+        } | Where-Object { \$_ -and \$_ -ne 0 }
+        (@(\$child_pids) + @(\$parent_pids)) | Where-Object { \$_ } | Sort-Object -Unique
+      " 2>/dev/null | tr -d '\r' | grep -E '^[1-9][0-9]*$' || true)"
+      [ -z "$win_pids" ] && break
+      echo "Puerto $port ocupado por proceso(s) Windows PID(s): $win_pids. Cerrando via taskkill..."
+      for wpid in $win_pids; do
+        powershell.exe -NoProfile -Command "Stop-Process -Id $wpid -Force -ErrorAction SilentlyContinue" 2>/dev/null || true
+      done
+      sleep 1
+      attempts=$((attempts + 1))
+    done
+  fi
 }
 
 open_browser() {
