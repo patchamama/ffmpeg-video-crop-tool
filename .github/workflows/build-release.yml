@@ -33,6 +33,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Extract version (strip leading v)
+        shell: bash
+        run: |
+          RAW="${{ github.ref_name }}"
+          echo "VERSION=${RAW#v}" >> "$GITHUB_ENV"
+
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
@@ -68,18 +74,19 @@ jobs:
           --collect-all flask
           launcher.py
 
-      # ---- Package: Windows standard -------------------------------------------
+      # ---- NSIS installer (Windows only) ---------------------------------------
 
-      - name: Package Windows (standard installer zip)
+      - name: Install NSIS
+        if: runner.os == 'Windows'
+        run: choco install nsis --no-progress -y
+
+      - name: Build NSIS installer
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          New-Item -ItemType Directory -Path dist\pkg-standard -Force
-          Copy-Item dist\FFmpegCropTool.exe dist\pkg-standard\
-          Copy-Item scripts\install-context-menu.ps1  dist\pkg-standard\ -ErrorAction SilentlyContinue
-          Copy-Item scripts\uninstall-context-menu.ps1 dist\pkg-standard\ -ErrorAction SilentlyContinue
-          Compress-Archive -Path dist\pkg-standard\* `
-            -DestinationPath dist\FFmpegCropTool-${{ matrix.name }}.zip
+          $exeSrc = "$PWD\dist\FFmpegCropTool.exe"
+          makensis /DVERSION="${{ env.VERSION }}" /DEXE_SRC="$exeSrc" installer\windows.nsi
+          Write-Host "Installer built: dist\FFmpegCropTool-windows-installer.exe"
 
       # ---- Package: Windows portable (bundles ffmpeg) --------------------------
 
@@ -168,6 +175,7 @@ jobs:
         with:
           name: dist-${{ matrix.name }}
           path: |
+            dist/FFmpegCropTool-*.exe
             dist/FFmpegCropTool-*.zip
             dist/FFmpegCropTool-*.tar.gz
 
