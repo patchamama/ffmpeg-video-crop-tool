@@ -1,4 +1,5 @@
 from pathlib import Path
+import collections
 import json
 import os
 import queue
@@ -19,9 +20,14 @@ else:
 VIDEO_FOLDER = Path(os.environ.get("CROP_TOOL_VIDEO_DIR", _default_dir)).resolve()
 INITIAL_FILE = os.environ.get("CROP_TOOL_INITIAL_FILE", "")
 
-# Extra directories added at runtime via POST /add-dir (e.g. successive right-clicks)
+# Extra directories added at runtime via POST /open-file
 _extra_dirs: list[Path] = []
 _extra_dirs_lock = threading.Lock()
+
+# Consume-once queue for the file the user opened via right-click "Open With".
+# maxlen=1 so only the latest request is kept if the browser hasn't polled yet.
+_pending_open: collections.deque = collections.deque(maxlen=1)
+_pending_open_lock = threading.Lock()
 VIDEO_EXTENSIONS = (".mp4", ".mkv", ".avi", ".mov", ".webm", ".m4v")
 
 app = Flask(__name__)
@@ -470,34 +476,10 @@ let currentUrlValue = "";
 let videos = [];
 
 // ---------- init: load video list ------------------------------------------
-async function initVideoList() {
-    // If launched via right-click "Open With", a dir param may be set.
-    // Notify the server to add that directory before listing.
-    const params = new URLSearchParams(window.location.search);
-    const fileParam = params.get("file");
-    const dirParam  = params.get("dir");
 
-    if (dirParam) {
-        await fetch("/add-dir", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ dir: dirParam })
-        }).catch(() => {});
-        // Clean up URL so reloads don't re-add the dir
-        const clean = window.location.pathname;
-        window.history.replaceState({}, "", clean);
-    }
-
-    // Also check the server-side startup file (set via CROP_TOOL_INITIAL_FILE env)
-    let startupFile = fileParam || "";
-    if (!startupFile) {
-        try {
-            let r = await fetch("/startup-file");
-            let d = await r.json();
-            startupFile = d.file || "";
-        } catch(e) {}
-    }
-
+// Populate the <select> with the current video list and optionally pre-select
+// a file. Returns true if any videos were found.
+async function _populateVideoList(selectFile) {
     let data = await fetch("/list").then(r => r.json()).catch(() => []);
     videos = data;
     videoList.innerHTML = "";
@@ -507,7 +489,7 @@ async function initVideoList() {
         opt.textContent = "No videos found";
         videoList.appendChild(opt);
         updateUi();
-        return;
+        return false;
     }
     data.forEach(v => {
         let opt = document.createElement("option");
@@ -515,17 +497,48 @@ async function initVideoList() {
         opt.textContent = v;
         videoList.appendChild(opt);
     });
-
-    // Priority: URL/env file param > localStorage
-    let target = (startupFile && data.includes(startupFile))
-        ? startupFile
+    let target = (selectFile && data.includes(selectFile))
+        ? selectFile
         : localStorage.getItem(videoStorageKey);
-    if (target && data.includes(target)) {
-        videoList.value = target;
+    if (target && data.includes(target)) videoList.value = target;
+    return true;
+}
+
+async function initVideoList() {
+    // 1. Check for a file set by the launcher via right-click "Open With"
+    //    (consume-once: the server clears it after returning it).
+    let startupFile = "";
+    try {
+        let r = await fetch("/pending-open");
+        startupFile = (await r.json()).file || "";
+    } catch(e) {}
+
+    // 2. Fall back to the file set at server startup via env var.
+    if (!startupFile) {
+        try {
+            let r = await fetch("/startup-file");
+            startupFile = (await r.json()).file || "";
+        } catch(e) {}
     }
-    loadVideo(false);
+
+    let ok = await _populateVideoList(startupFile);
+    if (ok) loadVideo(false);
 }
 initVideoList();
+
+// Poll for files opened externally while this tab is already open.
+// Handles the case where the browser reuses an existing tab instead of
+// opening a new one when the user right-clicks "Open With" again.
+setInterval(async () => {
+    try {
+        let r = await fetch("/pending-open");
+        let d = await r.json();
+        if (d.file) {
+            let ok = await _populateVideoList(d.file);
+            if (ok) loadVideo(true);
+        }
+    } catch(e) {}
+}, 2000);
 
 videoList.addEventListener("change", () => loadVideo(true));
 video.addEventListener("timeupdate", updateUi);
@@ -1015,15 +1028,29 @@ def startup_file():
     return jsonify({"file": INITIAL_FILE})
 
 
-@app.route("/add-dir", methods=["POST"])
-def add_dir():
+@app.route("/open-file", methods=["POST"])
+def open_file_route():
+    """Called by the launcher when the server is already running and the user
+    opens a video via right-click 'Open With'. Adds the video's directory to
+    the search list and stores the filename so the browser can pick it up."""
     payload = request.get_json(force=True, silent=True) or {}
-    d = Path(payload.get("dir", "")).resolve()
-    if d.is_dir():
+    path = Path(payload.get("path", "")).resolve()
+    if path.is_file() and path.suffix.lower() in VIDEO_EXTENSIONS:
         with _extra_dirs_lock:
-            if d not in _extra_dirs and d != VIDEO_FOLDER:
-                _extra_dirs.append(d)
-    return jsonify({"ok": True, "dir": str(d)})
+            if path.parent not in _extra_dirs and path.parent != VIDEO_FOLDER:
+                _extra_dirs.append(path.parent)
+        with _pending_open_lock:
+            _pending_open.append(path.name)
+        return jsonify({"ok": True, "file": path.name})
+    return jsonify({"ok": False, "file": ""})
+
+
+@app.route("/pending-open")
+def pending_open():
+    """Consume-once: returns and clears the pending file opened externally."""
+    with _pending_open_lock:
+        file = _pending_open.popleft() if _pending_open else ""
+    return jsonify({"file": file})
 
 
 @app.route("/video/<path:name>")

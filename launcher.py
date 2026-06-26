@@ -264,14 +264,15 @@ def _maybe_setup_context_menu(exe_path: str) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Notify a running server about an extra directory
+# Notify a running server about a file to open
 # ---------------------------------------------------------------------------
 
-def _notify_server_add_dir(directory: str) -> bool:
+def _call_open_file(path: str) -> bool:
+    """Tell the running server to add the file's dir and queue it for the browser."""
     try:
-        data = json.dumps({"dir": directory}).encode()
+        data = json.dumps({"path": path}).encode()
         req = urllib.request.Request(
-            f"{BASE_URL}/add-dir",
+            f"{BASE_URL}/open-file",
             data=data,
             headers={"Content-Type": "application/json"},
             method="POST",
@@ -305,19 +306,14 @@ def main() -> None:
                 file_arg = p.resolve()
                 break
 
-    # Build the URL to open in the browser
-    open_url = BASE_URL
-    if file_arg:
-        open_url = (
-            f"{BASE_URL}?file={urllib.parse.quote(file_arg.name)}"
-            f"&dir={urllib.parse.quote(str(file_arg.parent))}"
-        )
-
-    # If the server is already running, just notify it and open the browser
+    # If the server is already running: tell it which file to open, then open a
+    # new browser tab. The tab's JS polls /pending-open and auto-selects the file.
+    # Using open_new_tab avoids the issue where webbrowser.open() reuses an
+    # existing tab without re-running initVideoList().
     if _is_server_running():
         if file_arg:
-            _notify_server_add_dir(str(file_arg.parent))
-        webbrowser.open(open_url)
+            _call_open_file(str(file_arg))
+        webbrowser.open_new_tab(BASE_URL)
         return
 
     print("FFmpeg Crop Tool")
@@ -337,7 +333,7 @@ def main() -> None:
     print(f"\nServer: {BASE_URL}")
     print("Press Ctrl+C to stop.\n")
 
-    threading.Timer(1.5, lambda: webbrowser.open(open_url)).start()
+    threading.Timer(1.5, lambda: webbrowser.open_new_tab(BASE_URL)).start()
 
     from crop_tool import app
     try:
