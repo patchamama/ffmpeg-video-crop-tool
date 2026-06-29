@@ -479,7 +479,10 @@ let videos = [];
 
 // Populate the <select> with the current video list and optionally pre-select
 // a file. Returns true if any videos were found.
-async function _populateVideoList(selectFile) {
+// Populate the video list. If selectFile is given it takes priority over
+// localStorage; pass forceSelect=true to skip localStorage fallback entirely
+// (used when the caller already knows which file must be loaded).
+async function _populateVideoList(selectFile, forceSelect) {
     let data = await fetch("/list").then(r => r.json()).catch(() => []);
     videos = data;
     videoList.innerHTML = "";
@@ -497,23 +500,46 @@ async function _populateVideoList(selectFile) {
         opt.textContent = v;
         videoList.appendChild(opt);
     });
-    let target = (selectFile && data.includes(selectFile))
-        ? selectFile
-        : localStorage.getItem(videoStorageKey);
+    let target;
+    if (selectFile && data.includes(selectFile)) {
+        target = selectFile;           // explicit file wins
+    } else if (!forceSelect) {
+        target = localStorage.getItem(videoStorageKey);  // localStorage fallback
+    }
     if (target && data.includes(target)) videoList.value = target;
     return true;
 }
 
 async function initVideoList() {
-    // 1. Check for a file set by the launcher via right-click "Open With"
-    //    (consume-once: the server clears it after returning it).
+    // Priority 1: URL params (?file=name&dir=path) — highest priority, never
+    // falls back to localStorage so the explicitly chosen video always loads.
+    const params = new URLSearchParams(window.location.search);
+    const fileParam = params.get("file");
+    const dirParam  = params.get("dir");
+
+    if (fileParam || dirParam) {
+        if (dirParam) {
+            await fetch("/add-dir", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ dir: dirParam })
+            }).catch(() => {});
+        }
+        // Clean URL so reloads don't re-add the dir
+        window.history.replaceState({}, "", window.location.pathname);
+        let ok = await _populateVideoList(fileParam || "", true);
+        if (ok) loadVideo(false);
+        return;
+    }
+
+    // Priority 2: consume-once file set by launcher via POST /open-file
     let startupFile = "";
     try {
         let r = await fetch("/pending-open");
         startupFile = (await r.json()).file || "";
     } catch(e) {}
 
-    // 2. Fall back to the file set at server startup via env var.
+    // Priority 3: file set at server startup via env var (CROP_TOOL_INITIAL_FILE)
     if (!startupFile) {
         try {
             let r = await fetch("/startup-file");
@@ -521,20 +547,19 @@ async function initVideoList() {
         } catch(e) {}
     }
 
-    let ok = await _populateVideoList(startupFile);
+    // Priority 4: localStorage (last used video)
+    let ok = await _populateVideoList(startupFile, false);
     if (ok) loadVideo(false);
 }
 initVideoList();
 
 // Poll for files opened externally while this tab is already open.
-// Handles the case where the browser reuses an existing tab instead of
-// opening a new one when the user right-clicks "Open With" again.
 setInterval(async () => {
     try {
         let r = await fetch("/pending-open");
         let d = await r.json();
         if (d.file) {
-            let ok = await _populateVideoList(d.file);
+            let ok = await _populateVideoList(d.file, true);
             if (ok) loadVideo(true);
         }
     } catch(e) {}
@@ -1026,6 +1051,17 @@ def url_info():
 @app.route("/startup-file")
 def startup_file():
     return jsonify({"file": INITIAL_FILE})
+
+
+@app.route("/add-dir", methods=["POST"])
+def add_dir():
+    payload = request.get_json(force=True, silent=True) or {}
+    d = Path(payload.get("dir", "")).resolve()
+    if d.is_dir():
+        with _extra_dirs_lock:
+            if d not in _extra_dirs and d != VIDEO_FOLDER:
+                _extra_dirs.append(d)
+    return jsonify({"ok": True})
 
 
 @app.route("/open-file", methods=["POST"])
