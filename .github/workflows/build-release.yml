@@ -210,4 +210,5 @@ jobs:
             --repo ${{ github.repository }} \
             --title "Release $TAG" \
             --generate-notes \
+            --latest \
             artifacts/*
