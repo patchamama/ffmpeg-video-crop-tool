@@ -10,13 +10,11 @@ import json
 import os
 import platform
 import shutil
-import socket
 import subprocess
 import sys
 import threading
 import time
 import urllib.parse
-import urllib.request
 import webbrowser
 from pathlib import Path
 
@@ -39,12 +37,58 @@ def _which(cmd: str) -> str | None:
     return shutil.which(cmd)
 
 
-def _is_server_running() -> bool:
-    try:
-        with socket.create_connection(("127.0.0.1", PORT), timeout=0.5):
-            return True
-    except OSError:
-        return False
+def _kill_server_on_port() -> bool:
+    """Kill any process listening on PORT. Returns True if something was killed."""
+    killed = False
+    if SYSTEM == "Windows":
+        try:
+            result = subprocess.run(
+                ["netstat", "-ano"], capture_output=True, text=True, timeout=5
+            )
+            seen_pids: set[str] = set()
+            for line in result.stdout.splitlines():
+                parts = line.split()
+                if len(parts) < 5:
+                    continue
+                local_addr = parts[1]
+                foreign_addr = parts[2]
+                pid = parts[-1]
+                if (
+                    local_addr.endswith(f":{PORT}")
+                    and foreign_addr in ("0.0.0.0:0", "[::]:0", "*:*")
+                    and pid.isdigit()
+                    and pid not in seen_pids
+                    and int(pid) != os.getpid()
+                ):
+                    seen_pids.add(pid)
+                    subprocess.run(
+                        ["taskkill", "/PID", pid, "/F"],
+                        capture_output=True, timeout=5,
+                    )
+                    killed = True
+        except Exception:
+            pass
+    else:
+        try:
+            result = subprocess.run(
+                ["lsof", "-ti", f"tcp:{PORT}"],
+                capture_output=True, text=True, timeout=5,
+            )
+            for pid in result.stdout.strip().splitlines():
+                pid = pid.strip()
+                if pid.isdigit() and int(pid) != os.getpid():
+                    subprocess.run(["kill", "-9", pid], capture_output=True, timeout=5)
+                    killed = True
+        except Exception:
+            try:
+                subprocess.run(
+                    ["fuser", "-k", f"{PORT}/tcp"],
+                    capture_output=True, timeout=5,
+                )
+                killed = True
+            except Exception:
+                pass
+    return killed
 
 
 def _load_config() -> dict:
@@ -280,26 +324,6 @@ def _maybe_setup_context_menu(exe_path: str) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Notify a running server about a file to open
-# ---------------------------------------------------------------------------
-
-def _call_open_file(path: str) -> bool:
-    """Tell the running server to add the file's dir and queue it for the browser."""
-    try:
-        data = json.dumps({"path": path}).encode()
-        req = urllib.request.Request(
-            f"{BASE_URL}/open-file",
-            data=data,
-            headers={"Content-Type": "application/json"},
-            method="POST",
-        )
-        with urllib.request.urlopen(req, timeout=2):
-            return True
-    except Exception:
-        return False
-
-
-# ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
 
@@ -327,9 +351,13 @@ def main() -> None:
                     file_arg = p.absolute()
                 break
 
+    # Kill any existing server instance so the new one always starts clean.
+    if _kill_server_on_port():
+        print(f"Stopped previous instance on port {PORT}.")
+        time.sleep(1.5)
+
     # Build the URL to open. Always embed ?file= and ?dir= when a file is given
-    # so the browser can immediately display and process them — this is the most
-    # reliable mechanism and is visible in the address bar for debugging.
+    # so the browser can immediately display and process them.
     if file_arg:
         open_url = (
             f"{BASE_URL}"
@@ -338,14 +366,6 @@ def main() -> None:
         )
     else:
         open_url = BASE_URL
-
-    # If the server is already running, also notify it via /open-file so the
-    # setInterval polling in any existing tab picks up the new file too.
-    if _is_server_running():
-        if file_arg:
-            _call_open_file(str(file_arg))
-        webbrowser.open_new_tab(open_url)
-        return
 
     print("FFmpeg Crop Tool")
     print("=" * 40)
