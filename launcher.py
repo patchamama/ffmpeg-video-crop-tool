@@ -19,6 +19,7 @@ import webbrowser
 from pathlib import Path
 
 PORT = 5553
+VERSION = "1.0.0"
 BASE_URL = f"http://127.0.0.1:{PORT}"
 CONFIG_DIR = Path.home() / ".ffmpeg_crop_tool"
 CONFIG_FILE = CONFIG_DIR / "config.json"
@@ -367,7 +368,7 @@ def main() -> None:
     else:
         open_url = BASE_URL
 
-    print("FFmpeg Crop Tool")
+    print(f"FFmpeg Crop Tool  v{VERSION}")
     print("=" * 40)
 
     if not check_and_install_deps():
