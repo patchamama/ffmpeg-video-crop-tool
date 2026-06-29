@@ -2,6 +2,22 @@
 
 A browser-based workstation for visually cropping videos using source-pixel-accurate coordinates. Draw a crop region by dragging, preview it with FFplay, and export with FFmpeg — for both local files and YouTube/URL videos.
 
+## Quick start — one line from the terminal
+
+**Windows** (PowerShell):
+```powershell
+curl -o start_ffmpeg-video-crop-tool.bat https://raw.githubusercontent.com/patchamama/ffmpeg-video-crop-tool/main/start_ffmpeg-video-crop-tool.bat; .\start_ffmpeg-video-crop-tool.bat
+```
+
+**macOS / Linux**:
+```bash
+curl -sSL https://raw.githubusercontent.com/patchamama/ffmpeg-video-crop-tool/main/start_ffmpeg-video-crop-tool.sh -o start_ffmpeg-video-crop-tool.sh && bash start_ffmpeg-video-crop-tool.sh
+```
+
+> The script auto-downloads any missing files (`crop_tool.py`, `requirements.txt`) from this repo, installs Python dependencies, and starts the app.
+
+---
+
 ## Features
 
 - **Visual crop editor** — drag and resize the crop box directly on the video preview

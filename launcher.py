@@ -234,33 +234,49 @@ def _install_linux_desktop(exe_path: str) -> None:
 
 
 def _maybe_setup_context_menu(exe_path: str) -> None:
-    """On first run, prompt user and register context menu."""
-    cfg = _load_config()
-    if cfg.get("context_menu_asked"):
-        return
+    """Register context menu entries, prompting on first run.
 
-    cfg["context_menu_asked"] = True
-    _save_config(cfg)
+    On subsequent runs the registration is silently refreshed with the current
+    exe path — this is critical when the user installs a new version to a
+    different location, because HKCU takes precedence over HKCR and would
+    otherwise keep pointing at the old exe indefinitely.
+    """
+    cfg = _load_config()
+    first_time = not cfg.get("context_menu_asked")
 
     if SYSTEM == "Windows":
-        try:
-            import tkinter as tk
-            from tkinter import messagebox
-            root = tk.Tk()
-            root.withdraw()
-            answer = messagebox.askyesno(
-                "FFmpeg Crop Tool",
-                "Add 'Open with FFmpeg Crop Tool' to the right-click menu for video files?\n\n"
-                "(This can be undone by running the app with --unregister-context-menu)",
-            )
-            root.destroy()
-            if answer:
+        if first_time:
+            cfg["context_menu_asked"] = True
+            _save_config(cfg)
+            try:
+                import tkinter as tk
+                from tkinter import messagebox
+                root = tk.Tk()
+                root.withdraw()
+                answer = messagebox.askyesno(
+                    "FFmpeg Crop Tool",
+                    "Add 'Open with FFmpeg Crop Tool' to the right-click menu for video files?\n\n"
+                    "(This can be undone by running the app with --unregister-context-menu)",
+                )
+                root.destroy()
+                if answer:
+                    cfg["context_menu_registered"] = True
+                    _save_config(cfg)
+                    _register_windows_context_menu(exe_path)
+            except Exception:
+                pass
+        elif cfg.get("context_menu_registered"):
+            # Silently re-register with current exe path so updates take effect.
+            try:
                 _register_windows_context_menu(exe_path)
-        except Exception:
-            pass
+            except Exception:
+                pass
 
     elif SYSTEM == "Linux":
-        _install_linux_desktop(exe_path)
+        if first_time:
+            cfg["context_menu_asked"] = True
+            _save_config(cfg)
+            _install_linux_desktop(exe_path)
 
 
 # ---------------------------------------------------------------------------
@@ -297,13 +313,18 @@ def main() -> None:
             print("Context menu unregistration is only supported on Windows via this flag.")
         return
 
-    # Resolve optional file argument (from right-click "Open With")
+    # Resolve optional file argument (from right-click "Open With").
+    # Accept by existence OR by extension — is_file() can return False on
+    # network/cloud-synced paths even when the file is perfectly valid.
     file_arg: Path | None = None
     for arg in sys.argv[1:]:
-        if not arg.startswith("--"):
-            p = Path(arg)
-            if p.is_file():
-                file_arg = p.resolve()
+        if not arg.startswith("--") and arg.strip():
+            p = Path(arg.strip())
+            if p.is_file() or p.suffix.lower() in VIDEO_EXTS:
+                try:
+                    file_arg = p.resolve()
+                except OSError:
+                    file_arg = p.absolute()
                 break
 
     # Build the URL to open. Always embed ?file= and ?dir= when a file is given
