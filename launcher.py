@@ -306,14 +306,24 @@ def main() -> None:
                 file_arg = p.resolve()
                 break
 
-    # If the server is already running: tell it which file to open, then open a
-    # new browser tab. The tab's JS polls /pending-open and auto-selects the file.
-    # Using open_new_tab avoids the issue where webbrowser.open() reuses an
-    # existing tab without re-running initVideoList().
+    # Build the URL to open. Always embed ?file= and ?dir= when a file is given
+    # so the browser can immediately display and process them — this is the most
+    # reliable mechanism and is visible in the address bar for debugging.
+    if file_arg:
+        open_url = (
+            f"{BASE_URL}"
+            f"?file={urllib.parse.quote(file_arg.name)}"
+            f"&dir={urllib.parse.quote(str(file_arg.parent))}"
+        )
+    else:
+        open_url = BASE_URL
+
+    # If the server is already running, also notify it via /open-file so the
+    # setInterval polling in any existing tab picks up the new file too.
     if _is_server_running():
         if file_arg:
             _call_open_file(str(file_arg))
-        webbrowser.open_new_tab(BASE_URL)
+        webbrowser.open_new_tab(open_url)
         return
 
     print("FFmpeg Crop Tool")
@@ -322,7 +332,8 @@ def main() -> None:
     if not check_and_install_deps():
         sys.exit(1)
 
-    # Set video directory via environment (crop_tool.py reads this)
+    # Set video directory via environment so crop_tool.py uses the right folder
+    # even before the browser has loaded and processed the ?dir= URL param.
     if file_arg:
         os.environ["CROP_TOOL_VIDEO_DIR"] = str(file_arg.parent)
         os.environ["CROP_TOOL_INITIAL_FILE"] = file_arg.name
@@ -333,7 +344,7 @@ def main() -> None:
     print(f"\nServer: {BASE_URL}")
     print("Press Ctrl+C to stop.\n")
 
-    threading.Timer(1.5, lambda: webbrowser.open_new_tab(BASE_URL)).start()
+    threading.Timer(1.5, lambda: webbrowser.open_new_tab(open_url)).start()
 
     from crop_tool import app
     try:
