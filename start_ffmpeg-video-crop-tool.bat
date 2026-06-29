@@ -4,6 +4,8 @@ setlocal enabledelayedexpansion
 set "REPO=patchamama/ffmpeg-video-crop-tool"
 set "RAW_BASE=https://raw.githubusercontent.com/%REPO%/main"
 set "SCRIPT_DIR=%~dp0"
+set "VENV=%SCRIPT_DIR%.venv"
+set "VENV_PY=%VENV%\Scripts\python.exe"
 
 :: ---------------------------------------------------------------------------
 :: Auto-bootstrap: download missing files from GitHub
@@ -59,27 +61,30 @@ if not exist "%SCRIPT_DIR%.git" (
 )
 
 :: ---------------------------------------------------------------------------
-:: Install Python requirements (Flask etc.)
+:: Create virtual environment if missing
 :: ---------------------------------------------------------------------------
-if exist "%SCRIPT_DIR%requirements.txt" (
-    echo Installing Python requirements...
+if not exist "%VENV_PY%" (
+    echo Creating virtual environment...
     where py >nul 2>&1
     if !errorlevel!==0 (
-        py -m pip install -q -r "%SCRIPT_DIR%requirements.txt"
+        py -m venv "%VENV%"
     ) else (
-        python -m pip install -q -r "%SCRIPT_DIR%requirements.txt"
+        python -m venv "%VENV%"
     )
 )
 
 :: ---------------------------------------------------------------------------
-:: Run via launcher (handles kill-old-instance, dep check, browser open)
+:: Install / sync Python requirements inside venv
 :: ---------------------------------------------------------------------------
-where py >nul 2>&1
-if %errorlevel%==0 (
-    py "%SCRIPT_DIR%launcher.py" %*
-) else (
-    python "%SCRIPT_DIR%launcher.py" %*
+if exist "%SCRIPT_DIR%requirements.txt" (
+    echo Installing Python requirements...
+    "%VENV_PY%" -m pip install -q -r "%SCRIPT_DIR%requirements.txt"
 )
+
+:: ---------------------------------------------------------------------------
+:: Run via launcher using venv Python
+:: ---------------------------------------------------------------------------
+"%VENV_PY%" "%SCRIPT_DIR%launcher.py" %*
 goto :eof
 
 :: ---------------------------------------------------------------------------
