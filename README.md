@@ -54,12 +54,12 @@ Place your video files in the same directory as `crop_tool.py`.
 
 **Linux / macOS**
 ```bash
-./start.sh
+./start_ffmpeg-video-crop-tool.sh
 ```
 
 **Windows**
 ```bat
-start.bat
+start_ffmpeg-video-crop-tool.bat
 ```
 
 **Manually**
