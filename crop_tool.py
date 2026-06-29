@@ -8,7 +8,10 @@ import sys
 import threading
 import uuid
 
+import tempfile
+
 from flask import Flask, Response, abort, jsonify, request, send_from_directory, stream_with_context
+from werkzeug.utils import secure_filename
 
 # When frozen by PyInstaller, use the exe's directory so videos sit next to the app.
 # CROP_TOOL_VIDEO_DIR lets the launcher override this (e.g. right-click "Open With").
@@ -29,9 +32,11 @@ _extra_dirs_lock = threading.Lock()
 _pending_open: collections.deque = collections.deque(maxlen=1)
 _pending_open_lock = threading.Lock()
 VIDEO_EXTENSIONS = (".mp4", ".mkv", ".avi", ".mov", ".webm", ".m4v")
+_upload_dir = Path(tempfile.gettempdir()) / "ffmpeg_crop_uploads"
 
 app = Flask(__name__)
 JOBS = {}
+STARTUP_TOKEN = uuid.uuid4().hex
 
 
 # ------------ helpers -------------------------------------------------------
@@ -237,7 +242,7 @@ def build_media_args(payload):
     if tool == "ffplay":
         return ["ffplay", "-ss", f"{seek:.3f}", "-i", str(input_path), "-vf", crop_filter], None
 
-    output_path = VIDEO_FOLDER / f"cropped_{input_path.stem}.mp4"
+    output_path = input_path.parent / f"cropped_{input_path.stem}.mp4"
     return [
         "ffmpeg", "-y",
         "-ss", f"{seek:.3f}",
@@ -294,6 +299,32 @@ body { margin: 0; background: #020617; }
 
 button { cursor: pointer; }
 
+#drop-overlay {
+    display: none;
+    position: fixed;
+    inset: 0;
+    z-index: 100;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    background: rgba(2, 6, 23, 0.82);
+    border: 4px dashed rgb(34, 211, 238);
+    pointer-events: none;
+    gap: 1rem;
+}
+#drop-overlay.active {
+    display: flex;
+}
+
+#dropZone {
+    border: 2px dashed rgb(71 85 105);
+    transition: border-color 0.15s, background 0.15s;
+}
+#dropZone:hover, #dropZone.drag-over {
+    border-color: rgb(34 211 238);
+    background: rgba(6,182,212,0.06);
+}
+
 .tab-active {
     background: rgb(6 182 212);
     color: rgb(2 6 23);
@@ -336,17 +367,34 @@ button { cursor: pointer; }
         </div>
 
         <!-- Local controls -->
-        <div id="localControls" class="mb-4 flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
-          <div class="flex flex-1 gap-3 min-w-0">
+        <div id="localControls" class="mb-4 flex flex-col gap-3">
+
+          <!-- Row: select + load + jump -->
+          <div class="flex flex-wrap gap-3 items-center">
             <select id="videoList" class="min-w-0 flex-1 rounded-xl border border-white/10 bg-slate-950 px-4 py-3 text-slate-100 outline-none ring-cyan-400/50 focus:ring-2"></select>
             <button onclick="loadVideo()" class="rounded-xl bg-cyan-400 px-5 py-3 font-semibold text-slate-950 transition hover:bg-cyan-300 whitespace-nowrap">Load</button>
+            <div class="flex items-center gap-2 rounded-xl border border-white/10 bg-slate-950 px-3 py-2">
+              <label class="text-sm text-slate-300">Jump (min)</label>
+              <input id="jump" type="number" value="30" class="w-20 rounded-lg border border-white/10 bg-slate-900 px-3 py-2 text-slate-100 outline-none focus:ring-2 focus:ring-cyan-400/50">
+              <button onclick="jump(-1)" class="rounded-lg bg-slate-800 px-3 py-2 font-bold hover:bg-slate-700">−</button>
+              <button onclick="jump(1)" class="rounded-lg bg-slate-800 px-3 py-2 font-bold hover:bg-slate-700">+</button>
+            </div>
           </div>
-          <div class="flex items-center gap-2 rounded-xl border border-white/10 bg-slate-950 px-3 py-2">
-            <label class="text-sm text-slate-300">Jump (min)</label>
-            <input id="jump" type="number" value="30" class="w-20 rounded-lg border border-white/10 bg-slate-900 px-3 py-2 text-slate-100 outline-none focus:ring-2 focus:ring-cyan-400/50">
-            <button onclick="jump(-1)" class="rounded-lg bg-slate-800 px-3 py-2 font-bold hover:bg-slate-700">−</button>
-            <button onclick="jump(1)" class="rounded-lg bg-slate-800 px-3 py-2 font-bold hover:bg-slate-700">+</button>
-          </div>
+
+          <!-- Drop zone / browse -->
+          <input type="file" id="filePicker" accept="video/mp4,video/x-matroska,video/x-msvideo,video/quicktime,video/webm,.mp4,.mkv,.avi,.mov,.webm,.m4v" style="display:none">
+          <label for="filePicker" id="dropZone"
+            class="flex items-center justify-center gap-4 rounded-xl bg-slate-950 px-5 py-5 cursor-pointer group">
+            <svg width="36" height="36" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5" class="text-slate-500 group-hover:text-cyan-400 transition-colors flex-shrink-0">
+              <path stroke-linecap="round" stroke-linejoin="round" d="M3 16.5v2.25A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75V16.5m-13.5-9L12 3m0 0l4.5 4.5M12 3v13.5"/>
+            </svg>
+            <div>
+              <p class="text-slate-300 text-sm font-medium group-hover:text-white transition-colors">
+                Drop a video here or <span class="text-cyan-400 font-semibold">click to browse</span>
+              </p>
+              <p class="text-xs text-slate-500 mt-1">mp4 · mkv · avi · mov · webm · m4v</p>
+            </div>
+          </label>
         </div>
 
         <!-- URL controls -->
@@ -378,6 +426,9 @@ button { cursor: pointer; }
           <div id="info" class="rounded-xl border border-white/10 bg-slate-950 px-4 py-3 font-mono text-sm text-emerald-300"></div>
           <div id="sourceInfo" class="rounded-xl border border-white/10 bg-slate-950 px-4 py-3 font-mono text-sm text-slate-300"></div>
         </div>
+
+        <!-- Upload status -->
+        <div id="upload-status" class="hidden mt-3 rounded-xl border border-cyan-400/20 bg-cyan-400/10 px-4 py-3 text-sm text-cyan-300 font-mono"></div>
       </section>
 
       <!-- Right: controls panel -->
@@ -448,6 +499,15 @@ button { cursor: pointer; }
   </div>
 </div>
 
+<!-- Drag & drop full-page overlay — must be BEFORE <script> so getElementById works at parse time -->
+<div id="drop-overlay">
+  <svg width="64" height="64" fill="none" viewBox="0 0 24 24" stroke="rgb(34,211,238)" stroke-width="1.5">
+    <path stroke-linecap="round" stroke-linejoin="round" d="M3 16.5v2.25A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75V16.5m-13.5-9L12 3m0 0l4.5 4.5M12 3v13.5"/>
+  </svg>
+  <p class="text-3xl font-bold text-cyan-300">Drop video here</p>
+  <p class="text-slate-400 text-sm">mp4 · mkv · avi · mov · webm · m4v</p>
+</div>
+
 <script>
 // ---------- state -----------------------------------------------------------
 let crop = document.getElementById("crop");
@@ -467,7 +527,6 @@ let sourceInfo = document.getElementById("sourceInfo");
 let updatingInputs = false;
 let updatingCommands = false;
 let cropStorageKey = "ffmpegCropTool.cropValues";
-let videoStorageKey = "ffmpegCropTool.lastVideo";
 let sourceSize = { width: 1920, height: 1080, source: "default" };
 let pendingSourceCrop = null;
 let sourceMode = "local";   // "local" | "url"
@@ -477,12 +536,7 @@ let videos = [];
 
 // ---------- init: load video list ------------------------------------------
 
-// Populate the <select> with the current video list and optionally pre-select
-// a file. Returns true if any videos were found.
-// Populate the video list. If selectFile is given it takes priority over
-// localStorage; pass forceSelect=true to skip localStorage fallback entirely
-// (used when the caller already knows which file must be loaded).
-async function _populateVideoList(selectFile, forceSelect) {
+async function _populateVideoList(selectFile) {
     let data = await fetch("/list").then(r => r.json()).catch(() => []);
     videos = data;
     videoList.innerHTML = "";
@@ -502,15 +556,15 @@ async function _populateVideoList(selectFile, forceSelect) {
     });
     let target;
     if (selectFile && data.includes(selectFile)) {
-        target = selectFile;           // explicit file wins
-    } else if (!forceSelect) {
-        target = localStorage.getItem(videoStorageKey);  // localStorage fallback
+        target = selectFile;
     }
     if (target && data.includes(target)) videoList.value = target;
     return true;
 }
 
 async function initVideoList() {
+    // Clear any leftover video selection from a previous session.
+    localStorage.removeItem("ffmpegCropTool.lastVideo");
     // Priority 1: URL params (?file=name&dir=path) — highest priority, never
     // falls back to localStorage so the explicitly chosen video always loads.
     const params = new URLSearchParams(window.location.search);
@@ -527,8 +581,8 @@ async function initVideoList() {
         }
         // Clean URL so reloads don't re-add the dir
         window.history.replaceState({}, "", window.location.pathname);
-        let ok = await _populateVideoList(fileParam || "", true);
-        if (ok) loadVideo(false);
+        let ok = await _populateVideoList(fileParam || "");
+        if (ok) loadVideo();
         return;
     }
 
@@ -547,25 +601,135 @@ async function initVideoList() {
         } catch(e) {}
     }
 
-    // Priority 4: localStorage (last used video)
-    let ok = await _populateVideoList(startupFile, false);
-    if (ok) loadVideo(false);
+    let ok = await _populateVideoList(startupFile);
+    if (ok) loadVideo();
 }
 initVideoList();
 
 // Poll for files opened externally while this tab is already open.
+// Also detect server restarts (token change) and reload the page.
+let _serverToken = null;
+setInterval(async () => {
+    try {
+        let r = await fetch("/healthcheck");
+        let d = await r.json();
+        if (_serverToken === null) {
+            _serverToken = d.token;
+        } else if (_serverToken !== d.token) {
+            window.location.reload();
+            return;
+        }
+    } catch(e) {}
+}, 2000);
+
 setInterval(async () => {
     try {
         let r = await fetch("/pending-open");
         let d = await r.json();
         if (d.file) {
-            let ok = await _populateVideoList(d.file, true);
-            if (ok) loadVideo(true);
+            let ok = await _populateVideoList(d.file);
+            if (ok) loadVideo();
         }
     } catch(e) {}
 }, 2000);
 
-videoList.addEventListener("change", () => loadVideo(true));
+// ---------- drag & drop + file browse upload --------------------------------
+// NOTE: #drop-overlay must exist in the DOM before this script runs.
+(function() {
+    let filePicker   = document.getElementById("filePicker");
+    let dropOverlay  = document.getElementById("drop-overlay");
+    let dropZone     = document.getElementById("dropZone");
+    let uploadStatus = document.getElementById("upload-status");
+    let dragDepth    = 0;
+
+    if (!dropOverlay) { console.error("drop-overlay element not found"); return; }
+
+    function isVideoFile(f) {
+        return /\.(mp4|mkv|avi|mov|webm|m4v)$/i.test(f.name) || (f.type && f.type.startsWith("video/"));
+    }
+
+    function hasDraggedFiles(e) {
+        try {
+            return [...e.dataTransfer.types].some(t => t.toLowerCase() === "files");
+        } catch(_) { return false; }
+    }
+
+    filePicker.addEventListener("change", e => {
+        let f = e.target.files[0];
+        if (f) uploadFile(f);
+        filePicker.value = "";
+    });
+
+    function showDrag() {
+        dropOverlay.classList.add("active");
+        if (dropZone) dropZone.classList.add("drag-over");
+    }
+    function hideDrag() {
+        dropOverlay.classList.remove("active");
+        if (dropZone) dropZone.classList.remove("drag-over");
+    }
+
+    document.addEventListener("dragenter", e => {
+        if (hasDraggedFiles(e)) { e.preventDefault(); dragDepth++; showDrag(); }
+    });
+    document.addEventListener("dragleave", () => {
+        dragDepth = Math.max(0, dragDepth - 1);
+        if (dragDepth === 0) hideDrag();
+    });
+    document.addEventListener("dragover", e => {
+        if (hasDraggedFiles(e)) e.preventDefault();
+    });
+    document.addEventListener("drop", e => {
+        e.preventDefault();
+        dragDepth = 0;
+        hideDrag();
+        let f = [...e.dataTransfer.files].find(isVideoFile);
+        if (f) uploadFile(f);
+    });
+
+    function setStatus(msg, autoHide) {
+        uploadStatus.textContent = msg;
+        uploadStatus.classList.remove("hidden");
+        if (autoHide) setTimeout(() => uploadStatus.classList.add("hidden"), 4000);
+    }
+
+    function uploadFile(file) {
+        if (!isVideoFile(file)) {
+            setStatus("Unsupported file type. Use mp4, mkv, avi, mov, webm or m4v.", false);
+            return;
+        }
+        let form = new FormData();
+        form.append("video", file);
+        let xhr = new XMLHttpRequest();
+        xhr.upload.addEventListener("progress", e => {
+            if (e.lengthComputable) {
+                let pct = Math.round(e.loaded / e.total * 100);
+                setStatus(`Uploading ${file.name}… ${pct}%`, false);
+            }
+        });
+        xhr.onload = async () => {
+            if (xhr.status === 200) {
+                let d = JSON.parse(xhr.responseText);
+                if (d.ok) {
+                    setStatus(`Loaded: ${d.file}`, true);
+                    setMode("local");
+                    let ok = await _populateVideoList(d.file);
+                    if (ok) loadVideo();
+                } else {
+                    setStatus(`Error: ${d.error || "upload failed"}`, false);
+                }
+            } else {
+                setStatus(`Upload failed (HTTP ${xhr.status})`, false);
+            }
+        };
+        xhr.onerror = () => setStatus("Upload error — is the server running?", false);
+        xhr.open("POST", "/upload");
+        setStatus(`Uploading ${file.name}…`, false);
+        xhr.send(form);
+    }
+})();
+
+videoList.addEventListener("change", () => loadVideo());
 video.addEventListener("timeupdate", updateUi);
 video.addEventListener("seeked", updateUi);
 video.addEventListener("pause", updateUi);
@@ -604,10 +768,9 @@ function setMode(mode) {
 }
 
 // ---------- local file loading ----------------------------------------------
-async function loadVideo(persist = true) {
+async function loadVideo() {
     let v = videoList.value;
     if (!v) return;
-    if (persist) localStorage.setItem(videoStorageKey, v);
     await loadVideoMetadata(v);
     video.src = "/video/" + encodeURIComponent(v);
     let saved = readSavedCropValues();
@@ -955,6 +1118,7 @@ async function runTool(tool) {
 
     let logs = document.getElementById("logs");
     logs.textContent = `Starting ${tool}...\n`;
+    logs.closest("section").scrollIntoView({ behavior: "smooth", block: "start" });
 
     let response = await fetch("/run", {
         method: "POST",
@@ -1018,6 +1182,7 @@ function copyPlayCmd()   { copyText(playCmd.value);   alert("FFplay command copi
 function copyDlCmd()     { copyText(dlCmd.value);     alert("Download command copied!"); }
 function copyDlCropCmd() { copyText(dlCropCmd.value); alert("Download + crop command copied!"); }
 </script>
+
 </body>
 </html>
 """
@@ -1028,6 +1193,28 @@ function copyDlCropCmd() { copyText(dlCropCmd.value); alert("Download + crop com
 @app.route("/")
 def index():
     return HTML
+
+
+@app.route("/healthcheck")
+def healthcheck():
+    return jsonify({"token": STARTUP_TOKEN})
+
+
+@app.route("/upload", methods=["POST"])
+def upload_video():
+    f = request.files.get("video")
+    if not f or not f.filename:
+        abort(400, "No file provided")
+    name = secure_filename(f.filename)
+    if not name or Path(name).suffix.lower() not in VIDEO_EXTENSIONS:
+        abort(400, "Unsupported file type")
+    _upload_dir.mkdir(parents=True, exist_ok=True)
+    dest = _upload_dir / name
+    f.save(str(dest))
+    with _extra_dirs_lock:
+        if _upload_dir not in _extra_dirs and _upload_dir != VIDEO_FOLDER:
+            _extra_dirs.append(_upload_dir)
+    return jsonify({"ok": True, "file": name})
 
 
 @app.route("/list")
